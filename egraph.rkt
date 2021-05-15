@@ -9,8 +9,6 @@
    symbols
    [num-nodes #:mutable]))
 
-(define literal? (or symbol? number?))
-
 (define (init-egraph)
   (define conn (sqlite3-connect #:database 'memory))
   (define symbols (make-hash))
@@ -147,6 +145,7 @@
 (add-symbol! E 2 0)
 (define id1 (add-s-expr! E '(f 1 (g 1))))
 (define id2 (add-s-expr! E '(f 1 (g 2))))
+; get the id of (g 1) and (g 2)
 (define id3 (add-s-expr! E '(g 1)))
 (define id4 (add-s-expr! E '(g 2)))
 ; relation f should have two rows
