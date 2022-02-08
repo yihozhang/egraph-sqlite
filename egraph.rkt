@@ -5,21 +5,28 @@
 (require data/queue)
 (require data/union-find)
 (require data/gvector)
+(require db/unsafe/sqlite3)
 
 (provide init-egraph add-symbol!
-         add-node! add-s-expr!
+         add-node! add-s-expr! 
+         get-node-id get-s-expr-id
          show-egraph merge
          egraph-num-nodes
          egraph-symbols
          egraph-conn)
 
-(struct egraph (conn symbols [size #:mutable]))
+(struct egraph (conn symbols [count #:mutable]))
 
 (define (init-egraph)
   (define conn (sqlite3-connect #:database 'memory))
   (define symbols (make-hash))
+  (define E (egraph conn symbols 0))
+  (sqlite3-create-function conn "next_id" 1
+                           (λ (unused) (let ([count (egraph-count E)])
+                                         (set-egraph-count! E (add1 count))
+                                         count)))
   ; (define ufs (make-gvector))
-  (egraph conn symbols 0))
+  E)
 
 (define (add-symbol! E f arity)
   (define (next-rel-name)
@@ -35,12 +42,12 @@
     stmt)
 
   (define (create-uniq-stmt rel-name arity)
-      (define fields (build-list arity (λ (i) (format "child~a" i))))
-      (define stmt 
-        (string-append
-         "CREATE UNIQUE INDEX " rel-name "_uniq_idx "
-         " ON " rel-name "(" (string-join (cons "eclass" fields) ", ") ");"))
-      stmt)
+    (define fields (build-list arity (λ (i) (format "child~a" i))))
+    (define stmt 
+      (string-append
+       "CREATE UNIQUE INDEX " rel-name "_uniq_idx "
+       " ON " rel-name "(" (string-join (cons "eclass" fields) ", ") ");"))
+    stmt)
 
   (define rel-name (next-rel-name))
   (define symbols (egraph-symbols E))
@@ -74,38 +81,61 @@
   (displayln (format "~a symbols in total\n" (hash-count (egraph-symbols E)))))
 
 (define (egraph-num-nodes E)
-  (egraph-size E))
+  ; TODO: this is inaccurate (due to congruence)
+  (egraph-count E))
+
+(define (get-node-id E node #:all-id? [all-id? #f])
+  (let* ([f (car node)]
+         [arg-ids (cdr node)]
+         [arity (length arg-ids)]
+         [conn (egraph-conn E)]
+         [symbols (egraph-symbols E)]
+         [rel-name (hash-ref symbols (cons f arity))]
+         [query-stmt (format "SELECT eclass FROM ~a WHERE true ~a ~a;" rel-name
+                             (string-join
+                              (for/list ([id (in-list arg-ids)]
+                                         [i (in-naturals)])
+                                (format "AND child~a = ~a" i id)))
+                             (if all-id? "" "LIMIT 1"))])
+    (displayln query-stmt)
+    (if all-id?
+        (query-list conn query-stmt)
+        (query-maybe-value conn query-stmt))))
+
+(define (get-s-expr-id E expr #:all-id? [all-id? #f])
+  ;(define (get-arg-ids args)
+  ;  (if (empty? args) '()
+        
+  (match expr
+    [`(,f ,args ...)
+     (let ([arg-ids (map (λ (arg) (get-s-expr-id E expr #:all-id? all-id?)) args)])
+       (get-node-id E `(,f ,@arg-ids) #:all-id? all-id?))]))
 
 (define (add-node! E node)
-  (match node
-    [`(,f ,arg-ids ...)
-     (let* ([arity (length arg-ids)]
-            [conn (egraph-conn E)]
-            [symbols (egraph-symbols E)]
-            [rel-name (hash-ref symbols (cons f arity))]
-            ; TODO: merge them into one query
-            [query-stmt (format "SELECT eclass FROM ~a WHERE true ~a;" rel-name
-                                (string-join
-                                 (for/list ([id (in-list arg-ids)]
-                                            [i (in-naturals)])
-                                   (format "AND child~a = ~a" i id))))]
-            [id (query-maybe-value conn query-stmt)])
-       (or id (let* ([num-nodes (egraph-num-nodes E)]
-                     [args (map number->string (cons num-nodes arg-ids))]
-                     [insert-stmt (format "INSERT INTO ~a VALUES (~a);" rel-name
-                                          (string-join args ", "))])
-                (query-exec conn insert-stmt)
-                (set-egraph-size! E (add1 num-nodes))
-                num-nodes)))]
-    [c (add-node! E (list c))]))
+  (define ids (get-node-id E node))
+  (if (not (empty? ids))
+      ids
+      (let* ([f (car node)]
+             [arg-ids (cdr node)]
+             [arity (length arg-ids)]
+             [conn (egraph-conn E)]
+             [symbols (egraph-symbols E)]
+             [rel-name (hash-ref symbols (cons f arity))]
+             [num-nodes (egraph-num-nodes E)]
+             [args (map number->string (cons num-nodes arg-ids))]
+             [insert-stmt (format "INSERT INTO ~a VALUES (~a);" rel-name
+                                  (string-join args ", "))])
+        (displayln insert-stmt)
+        (query-exec conn insert-stmt)
+        (set-egraph-count! E (add1 num-nodes))
+        (list num-nodes))))
+    
 
 (define (add-s-expr! E expr)
   (match expr
     [`(,f ,args ...)
      (let ([arg-ids (map (λ (arg) (add-s-expr! E arg)) args)])
-       (add-node! E `(,f ,@arg-ids))
-       )]
-    [c (add-node! E c)]))
+       (add-node! E `(,f ,@arg-ids)))]))
 
 (define (merge E class1 class2)
   (define conn (egraph-conn E))
