@@ -13,15 +13,13 @@
          egraph-symbols
          egraph-conn)
 
-(struct egraph (conn symbols ufs))
-
-
+(struct egraph (conn symbols [size #:mutable]))
 
 (define (init-egraph)
   (define conn (sqlite3-connect #:database 'memory))
   (define symbols (make-hash))
-  (define ufs (make-gvector))
-  (egraph conn symbols ufs))
+  ; (define ufs (make-gvector))
+  (egraph conn symbols 0))
 
 (define (add-symbol! E f arity)
   (define (next-rel-name)
@@ -55,8 +53,8 @@
               [uniq-stmt (create-uniq-stmt rel-name arity)]
               )
           (query-exec conn create-stmt)
-          (displayln uniq-stmt)
-          ;(query-exec conn uniq-stmt)
+          ; (displayln uniq-stmt)
+          (query-exec conn uniq-stmt)
           #t))))
 
 (define (show-egraph E)
@@ -76,7 +74,7 @@
   (displayln (format "~a symbols in total\n" (hash-count (egraph-symbols E)))))
 
 (define (egraph-num-nodes E)
-  (gvector-count (egraph-ufs E)))
+  (egraph-size E))
 
 (define (add-node! E node)
   (match node
@@ -88,7 +86,7 @@
             ; TODO: merge them into one query
             [query-stmt (format "SELECT eclass FROM ~a WHERE true ~a;" rel-name
                                 (string-join
-                                 (for/list ([id arg-ids]
+                                 (for/list ([id (in-list arg-ids)]
                                             [i (in-naturals)])
                                    (format "AND child~a = ~a" i id))))]
             [id (query-maybe-value conn query-stmt)])
@@ -97,7 +95,7 @@
                      [insert-stmt (format "INSERT INTO ~a VALUES (~a);" rel-name
                                           (string-join args ", "))])
                 (query-exec conn insert-stmt)
-                (gvector-add! (egraph-ufs E) (uf-new num-nodes))
+                (set-egraph-size! E (add1 num-nodes))
                 num-nodes)))]
     [c (add-node! E (list c))]))
 
@@ -118,7 +116,7 @@
                [_ (set-remove! todos todo)]
                [class1 (car todo)]
                [class2 (cdr todo)])
-          (for ([(symbol rel-name) (egraph-symbols E)])
+          (for ([(symbol rel-name) (in-hash (egraph-symbols E))])
             (let* ([f (car symbol)]
                    [arity (cdr symbol)]
                    [build-ands (λ (i j)
@@ -150,7 +148,7 @@
                            "AND ~a")
                           rel-name rel-name pred)]
                    [new-todos (query-rows conn stmt)]
-                   [_ (for ([todo new-todos])
+                   [_ (for ([todo (in-list new-todos)])
                         (define todo+ (cons (vector-ref todo 0)
                                             (vector-ref todo 1)))
                         (set-add! todos todo+))]
