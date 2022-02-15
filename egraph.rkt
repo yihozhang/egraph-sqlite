@@ -10,7 +10,7 @@
 (provide init-egraph add-symbol!
          add-node! add-s-expr! 
          get-node-id get-s-expr-id
-         show-egraph merge
+         show-egraph
          egraph-num-nodes
          egraph-symbols
          egraph-conn)
@@ -25,7 +25,6 @@
                            (λ (unused) (let ([count (egraph-count E)])
                                          (set-egraph-count! E (add1 count))
                                          count)))
-  ; (define ufs (make-gvector))
   E)
 
 (define (add-symbol! E f arity)
@@ -84,37 +83,34 @@
   ; TODO: this is inaccurate (due to congruence)
   (egraph-count E))
 
-(define (get-node-id E node #:all-id? [all-id? #f])
+(define (get-node-id E node)
   (let* ([f (car node)]
          [arg-ids (cdr node)]
          [arity (length arg-ids)]
          [conn (egraph-conn E)]
          [symbols (egraph-symbols E)]
          [rel-name (hash-ref symbols (cons f arity))]
-         [query-stmt (format "SELECT eclass FROM ~a WHERE true ~a ~a;" rel-name
+         [query-stmt (format "SELECT eclass FROM ~a WHERE true ~a;" rel-name
                              (string-join
                               (for/list ([id (in-list arg-ids)]
                                          [i (in-naturals)])
-                                (format "AND child~a = ~a" i id)))
-                             (if all-id? "" "LIMIT 1"))])
+                                (format "AND child~a = ~a" i id))))])
     (displayln query-stmt)
-    (if all-id?
-        (query-list conn query-stmt)
-        (query-maybe-value conn query-stmt))))
+    (query-maybe-value conn query-stmt)))
 
-(define (get-s-expr-id E expr #:all-id? [all-id? #f])
-  ;(define (get-arg-ids args)
-  ;  (if (empty? args) '()
-        
+(define (get-s-expr-id E expr)
   (match expr
     [`(,f ,args ...)
-     (let ([arg-ids (map (λ (arg) (get-s-expr-id E expr #:all-id? all-id?)) args)])
-       (get-node-id E `(,f ,@arg-ids) #:all-id? all-id?))]))
+     (define arg-ids
+       (foldr (λ (arg lst)
+                (and lst ; return lst if lst is #f
+                     (let ([id (get-s-expr-id E arg)])
+                       (and id (cons id lst))))) ; return id if id is #f
+              '() args))
+     (and arg-ids (get-node-id E `(,f ,@arg-ids)))]))
 
 (define (add-node! E node)
-  (define ids (get-node-id E node))
-  (if (not (empty? ids))
-      ids
+  (or (get-node-id E node) ; return if get-node-id return non-#f value
       (let* ([f (car node)]
              [arg-ids (cdr node)]
              [arity (length arg-ids)]
@@ -128,7 +124,7 @@
         (displayln insert-stmt)
         (query-exec conn insert-stmt)
         (set-egraph-count! E (add1 num-nodes))
-        (list num-nodes))))
+        num-nodes)))
     
 
 (define (add-s-expr! E expr)
@@ -136,71 +132,3 @@
     [`(,f ,args ...)
      (let ([arg-ids (map (λ (arg) (add-s-expr! E arg)) args)])
        (add-node! E `(,f ,@arg-ids)))]))
-
-(define (merge E class1 class2)
-  (define conn (egraph-conn E))
-  (define todos (mutable-set (cons class1 class2)))
-  (define (do)
-    (if (set-empty? todos) #f
-        (let* ([todo (set-first todos)]
-               [_ (set-remove! todos todo)]
-               [class1 (car todo)]
-               [class2 (cdr todo)])
-          (for ([(symbol rel-name) (in-hash (egraph-symbols E))])
-            (let* ([f (car symbol)]
-                   [arity (cdr symbol)]
-                   [build-ands (λ (i j)
-                                 (if (= i j)
-                                     (format
-                                      "f1.child~a = ~a AND f2.child~a = ~a"
-                                      j class1 j class2)
-                                     (format
-                                      "f1.child~a = f2.child~a"
-                                      j j)))]
-                   [build-ors (λ (i)
-                                (let ([ands (build-list
-                                             arity
-                                             (λ (j) (build-ands i j)))])
-                                  (string-join ands " AND "
-                                               #:before-first " OR ("
-                                               #:after-last ")")))]
-                   [ors (build-list arity build-ors)]
-                   [pred (string-join ors
-                                      #:before-first "(FALSE"
-                                      #:after-last ")")]
-
-                   ; 1. identify new todos
-                   [stmt (format
-                          (string-append
-                           "SELECT DISTINCT f1.eclass, f2.eclass "
-                           "FROM ~a f1, ~a f2 "
-                           "WHERE f1.eclass != f2.eclass "
-                           "AND ~a")
-                          rel-name rel-name pred)]
-                   [new-todos (query-rows conn stmt)]
-                   [_ (for ([todo (in-list new-todos)])
-                        (define todo+ (cons (vector-ref todo 0)
-                                            (vector-ref todo 1)))
-                        (set-add! todos todo+))]
-
-                   ; 2. delete duplicate rows
-                   [stmt (format
-                          (string-append
-                           "DELETE FROM ~a AS f1 "
-                           "WHERE EXISTS "
-                           "(SELECT 1 FROM ~a f2 WHERE ~a)")
-                          rel-name rel-name pred)]
-                   [_ (query-exec conn stmt)]
-
-                   ; 3. change all class1 to class2
-                   [_ (for ([col (stream-cons "eclass"
-                                              (stream-map
-                                               (λ (i) (format "child~a" i))
-                                               (in-range arity)))])
-                        (define stmt (format
-                                      "UPDATE ~a SET ~a = ~a WHERE ~a = ~a"
-                                      rel-name col class1 col class2))
-                        (query-exec conn stmt))]
-                   )
-              (void))))))
-  (do))
