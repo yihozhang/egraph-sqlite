@@ -2,7 +2,7 @@
 
 (require racket/hash)
 (require data/union-find)
-(require db)
+(require "conn.rkt")
 (require "egraph.rkt")
 
 ; to run this, put the update-to-date libsqlite3.0.dylib in the corresponding libraries
@@ -14,8 +14,9 @@
   (match pat
     [(list (? symbol? R) pats ... '@ (? (or/c false? symbol?) id))
      (let* ([pats (map rw-pat pats)]
-            [vars (map (λ (pat) (cond [(symbol? pat) pat]
-                                      [((listof pattern?) pat) (pattern-id (first pat))]))
+            [vars (map (λ (pat)
+                         (cond [(symbol? pat) pat]
+                               [((listof pattern?) pat) (pattern-id (first pat))]))
                        pats)])
        (cons (pattern R vars id) (flatten (filter (listof pattern?) pats))))]
     [(list R pats ...) (rw-pat `(,R ,@pats @ ,(gensym 'x)))]
@@ -59,11 +60,9 @@
   (define fields (string-join
                   (map (λ (var) (string-append (symbol->string var) " INTEGER")) vars)
                   ", "))
-  
+
   (define create-temp-rel (format "CREATE TEMP TABLE ~a (~a);" temp-rel-name fields))
-  ; (query-exec conn create-temp-rel)
   (query-exec conn create-temp-rel)
-  (displayln create-temp-rel)
   temp-rel-name)
 
 (define (populate-rw-rel-with-mat E rw-rel-name mat mat-var-set)
@@ -74,7 +73,7 @@
                  (define rel (get-rel-from-pattern E pat))
                  (format "~a f~a" rel i))])
       (string-join lst ", ")))
-    
+
   (define where-clause
     (let* ([work (λ (var locs)
                    (define loc (car locs))
@@ -88,14 +87,16 @@
       [string-join lst]))
   (define schema-select-clause
     (hash-map mat-var-set
-              (λ (var locs) (cons (symbol->string var) (get-loc-string E mat (first locs))))))
+              (λ (var locs)
+                (cons (symbol->string var)
+                      (get-loc-string E mat (first locs))))))
   (define schema (string-join (map car schema-select-clause) ", "))
   (define select-clause (string-join (map cdr schema-select-clause) ", "))
-  (define query (format "INSERT INTO ~a (~a) SELECT DISTINCT ~a FROM ~a WHERE TRUE ~a;"
-                        rw-rel-name
-                        schema select-clause
-                        from-clause where-clause))
-  (displayln query)
+  (define query (format
+                 "INSERT INTO ~a (~a) SELECT DISTINCT ~a FROM ~a WHERE TRUE ~a;"
+                 rw-rel-name
+                 schema select-clause
+                 from-clause where-clause))
   (query-exec conn query))
 
 (define (get-rel-from-pattern E pat)
@@ -105,7 +106,7 @@
 (define (chase-rw-rel E rw-rel-name app mat-var-set)
   (define conn (egraph-conn E))
   (define computed (list->mutable-set (hash-keys mat-var-set)))
-  
+
   (define (can-extend? pat)
     (and (andmap (λ (var) (set-member? computed var)) (pattern-vars pat))
          (not (set-member? computed (pattern-id pat)))))
@@ -120,14 +121,13 @@
     (define dominated (pattern-id pat))
     (define rel (get-rel-from-pattern E pat))
     ; rw.{var} = f.child{i}
-    (define where-constraints 
+    (define where-constraints
       (for/list ([var (in-list (pattern-vars pat))]
                  [i (in-naturals)])
         (format "AND rw.~a = f.child~a" (symbol->string var) i)))
     (define where-clause (string-join where-constraints))
     (define query (format "UPDATE ~a AS rw SET ~a = f.eclass FROM ~a f WHERE TRUE ~a;"
                           rw-rel-name dominated rel where-clause))
-    (displayln query)
     (query-exec conn query))
 
   (let loop ([pat (get-extendable app)])
@@ -142,7 +142,6 @@
   (for ([var (in-list rw-vars)])
     (define field (symbol->string var))
     (define query (format "UPDATE ~a SET ~a = next_id(total_changes()) WHERE ~a IS NULL;" rw-rel-name field field))
-    (displayln query)
     (query-exec conn query)))
 
 (define (drop-table E rel-name)
@@ -159,7 +158,6 @@
     (define select-clause (string-join (map symbol->string (cons id vars)) ", "))
     (define query
       (format "INSERT OR IGNORE INTO ~a SELECT DISTINCT ~a FROM ~a" rel select-clause rw-rel-name))
-    (displayln query)
     (query-exec conn query)))
 
 (define (view-table E rel)
@@ -185,6 +183,9 @@
 (define (rebuild E)
   (define conn (egraph-conn E))
   (define ids (make-hash))
+
+  (displayln "apply search time")
+  (time
   (for ([(symbol rel-name) (egraph-symbols E)])
     (let* ([func (car symbol)]
            [arity (cdr symbol)]
@@ -198,30 +199,55 @@
                    "FROM ~a f1, ~a f2 "
                    "WHERE f1.eclass != f2.eclass ~a;")
                   rel-name rel-name where-clause)]
-           [_ (displayln stmt)]
            [todos (query-rows conn stmt)])
-      
+
       (for ([todo todos])
         (let* ([a (vector-ref todo 0)]
                [b (vector-ref todo 1)]
-               [a+ (hash-ref! ids a (λ () (uf-new a)))]
-               [b+ (hash-ref! ids b (λ () (uf-new b)))])
+               [a+ (hash-ref! ids a (thunk (uf-new a)))]
+               [b+ (hash-ref! ids b (thunk (uf-new b)))])
           (uf-union! a+ b+)))))
+  )
+
+  (displayln "apply time")
   (when (not (hash-empty? ids))
-    ; TODO we can eliminate the outer loop by store (id, canon-id) to a relation
-    (for ([(id id-canon) ids]
-          #:when (not (equal? id (uf-find id-canon)))
-          [(symbol rel-name) (egraph-symbols E)])
-      (query-exec conn (format "UPDATE OR REPLACE ~a SET eclass = ~a WHERE eclass = ~a" rel-name id (uf-find id-canon)))
+    (time
+    (define cong-rel-name (symbol->string 'ids))
+    (define create-stmt
+      (format "CREATE TABLE ~a (a INTEGER, b INTEGER)"
+              cong-rel-name))
+    (query-exec conn create-stmt)
+
+    (define cong-values
+      (string-join
+       (for/list ([(id id-canon) ids]
+                  #:when (not (equal? id (uf-find id-canon))))
+         (format "(~a, ~a)" id (uf-find id-canon)))
+      ", "))
+    (define insert-stmt
+      (format "INSERT INTO ~a VALUES ~a;" cong-rel-name cong-values))
+    (query-exec conn insert-stmt)
+
+    (for ([(symbol rel-name) (egraph-symbols E)])
+      (define (stmt field)
+        (format (string-append
+                 "UPDATE OR REPLACE ~a "
+                 "SET ~a = t.b "
+                 "FROM ~a t "
+                 "WHERE ~a = t.a")
+                rel-name field cong-rel-name field))
+      (query-exec conn (stmt "eclass"))
       (for* ([i (in-range (cdr symbol))])
-        (let ([stmt (format ; REPLACE here is important because we use unique constraint to delete duplicate lines
-                     "UPDATE OR REPLACE ~a SET child~a = ~a WHERE child~a = ~a"
-                     rel-name i (uf-find id-canon) i id)])
-          (query-exec conn stmt))))
+          (query-exec conn (stmt (format "child~a" i)))))
+
+    (define drop-stmt (format "DROP TABLE ~a;" cong-rel-name))
+    (query-exec conn drop-stmt)
+    )
+
     (rebuild E)))
 
 (define (run-rw E rws)
-  
+  (begin-egraph-transaction E)
   (define rw-rel-names
     (for/list ([rw rws])
       (let* ([mat (rewrite-matcher rw)]
@@ -232,25 +258,25 @@
     (define app (rewrite-applier rw))
     (apply-rw-rel E rw-rel-name app)
     (drop-table E rw-rel-name))
-  
-  (rebuild E))
+  (rebuild E)
+  (commit-egraph-transaction E))
 
 (define E (init-egraph))
 (add-symbol! E '+ 2)
-(define N 10)
+(define N 11)
 (for ([i (in-range 0 N)])
   (add-symbol! E i 0))
 
-(add-s-expr! E '(+ (+ (+ (+ (+ (+ (1) (2)) (3)) (4)) (5)) (6)) (7)))
+; (add-s-expr! E '(+ (+ (+ (+ (+ (+ (+ (+ (+ (1) (2)) (3)) (4)) (5)) (6)) (7)) (8)) (9)) (10)))
+(add-s-expr! E '(+ (+ (+ (+ (+ (+ (+ (+ (1) (2)) (3)) (4)) (5)) (6)) (7)) (8)) (9)))
+; (add-s-expr! E '(+ (+ (+ (+ (+ (1) (2)) (3)) (4)) (5)) (6)))
 (define r1 (rw-rule ((+ (+ a b) c @ x)) => ((+ a (+ b c) @ x))))
 (define r2 (rw-rule ((+ a b @ x)) => ((+ b a @ x))))
-(for ([i (in-range 7)])
+(for ([i (in-range 9)])
   (run-rw E (list r1 r2)))
-(get-s-expr-id E '(+ (+ (+ (+ (+ (7) (6)) (5)) (4)) (3)) (2)))
-
-; (view-tables E)
-
-; (define conn (egraph-conn E))
+; (get-s-expr-id E '(+ (+ (+ (+ (+ (+ (1) (2)) (3)) (4)) (5)) (6)) (7)))
+(get-s-expr-id E '(+ (7) (+ (6) (+ (5) (+ (4) (+ (3) (+ (2) (1))))))))
+(define conn (egraph-conn E))
 
 ;(define rule (rw-rule ((* x y @ c1)
 ;                       (* z y @ c2))

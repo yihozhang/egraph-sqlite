@@ -1,19 +1,20 @@
 #lang racket
 
 (require racket/match)
-(require db)
 (require data/queue)
 (require data/union-find)
 (require data/gvector)
-(require db/unsafe/sqlite3)
+(require "conn.rkt")
 
 (provide init-egraph add-symbol!
-         add-node! add-s-expr! 
+         add-node! add-s-expr!
          get-node-id get-s-expr-id
          show-egraph
          egraph-num-nodes
          egraph-symbols
-         egraph-conn)
+         egraph-conn
+         begin-egraph-transaction
+         commit-egraph-transaction)
 
 (struct egraph (conn symbols [count #:mutable]))
 
@@ -56,10 +57,8 @@
         (hash-set! symbols (cons f arity) rel-name)
         (let ([conn (egraph-conn E)]
               [create-stmt (create-rel-stmt rel-name arity)]
-              [uniq-stmt (create-uniq-stmt rel-name arity)]
-              )
+              [uniq-stmt (create-uniq-stmt rel-name arity)])
           (query-exec conn create-stmt)
-          ; (displayln uniq-stmt)
           (query-exec conn uniq-stmt)
           #t))))
 
@@ -95,7 +94,6 @@
                               (for/list ([id (in-list arg-ids)]
                                          [i (in-naturals)])
                                 (format "AND child~a = ~a" i id))))])
-    (displayln query-stmt)
     (query-maybe-value conn query-stmt)))
 
 (define (get-s-expr-id E expr)
@@ -121,14 +119,20 @@
              [args (map number->string (cons num-nodes arg-ids))]
              [insert-stmt (format "INSERT INTO ~a VALUES (~a);" rel-name
                                   (string-join args ", "))])
-        (displayln insert-stmt)
         (query-exec conn insert-stmt)
         (set-egraph-count! E (add1 num-nodes))
         num-nodes)))
-    
 
 (define (add-s-expr! E expr)
   (match expr
     [`(,f ,args ...)
      (let ([arg-ids (map (λ (arg) (add-s-expr! E arg)) args)])
        (add-node! E `(,f ,@arg-ids)))]))
+
+(define (begin-egraph-transaction E)
+  (define conn (egraph-conn E))
+  (start-transaction conn))
+
+(define (commit-egraph-transaction E)
+  (define conn (egraph-conn E))
+  (commit-transaction conn))
