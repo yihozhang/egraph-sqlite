@@ -43,11 +43,30 @@
 
   (define (create-uniq-stmt rel-name arity)
     (define fields (build-list arity (λ (i) (format "child~a" i))))
-    (define stmt 
+    (define stmt
       (string-append
        "CREATE UNIQUE INDEX " rel-name "_uniq_idx "
        " ON " rel-name "(" (string-join (cons "eclass" fields) ", ") ");"))
     stmt)
+
+  (define (create-idx-stmts rel-name arity)
+    (define (stmt field [field-name field])
+      (format "CREATE INDEX ~a_~a_idx ON ~a (~a);"
+              rel-name field-name rel-name field))
+    (define child-idxs
+      (for/list ([i arity])
+        (stmt (format "child~a" i))))
+    (define class-idx (stmt "eclass"))
+    (define all-child-idx
+      (stmt (string-join
+             (build-list arity (λ (i) (format "child~a" i)))
+             ", ")
+            "all_child"))
+    (define stmts
+      (if (= arity 0)
+          (cons class-idx child-idxs)
+          (cons all-child-idx (cons class-idx child-idxs))))
+    stmts)
 
   (define rel-name (next-rel-name))
   (define symbols (egraph-symbols E))
@@ -57,9 +76,12 @@
         (hash-set! symbols (cons f arity) rel-name)
         (let ([conn (egraph-conn E)]
               [create-stmt (create-rel-stmt rel-name arity)]
-              [uniq-stmt (create-uniq-stmt rel-name arity)])
+              [uniq-stmt (create-uniq-stmt rel-name arity)]
+              [idx-stmts (create-idx-stmts rel-name arity)])
+          (displayln idx-stmts)
           (query-exec conn create-stmt)
           (query-exec conn uniq-stmt)
+          ; (for ([idx-stmt idx-stmts]) (query-exec conn idx-stmt))
           #t))))
 
 (define (show-egraph E)

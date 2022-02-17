@@ -272,8 +272,9 @@
 ; (add-s-expr! E '(+ (+ (+ (+ (+ (1) (2)) (3)) (4)) (5)) (6)))
 (define r1 (rw-rule ((+ (+ a b) c @ x)) => ((+ a (+ b c) @ x))))
 (define r2 (rw-rule ((+ a b @ x)) => ((+ b a @ x))))
-(for ([i (in-range 9)])
-  (run-rw E (list r1 r2)))
+(time
+ (for ([i (in-range 9)])
+   (run-rw E (list r1 r2))))
 ; (get-s-expr-id E '(+ (+ (+ (+ (+ (+ (1) (2)) (3)) (4)) (5)) (6)) (7)))
 (get-s-expr-id E '(+ (7) (+ (6) (+ (5) (+ (4) (+ (3) (+ (2) (1))))))))
 (define conn (egraph-conn E))
