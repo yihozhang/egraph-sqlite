@@ -22,6 +22,8 @@
   (define conn (sqlite3-connect #:database 'memory))
   (define symbols (make-hash))
   (define E (egraph conn symbols 0))
+  (define create-todo-stmt "CREATE TABLE todo (a INTEGER, b INTEGER);")
+  (query-exec conn create-todo-stmt)
   (sqlite3-create-function conn "next_id" 1
                            (λ (unused) (let ([count (egraph-count E)])
                                          (set-egraph-count! E (add1 count))
@@ -42,12 +44,16 @@
     stmt)
 
   (define (create-uniq-stmt rel-name arity)
-    (define fields (build-list arity (λ (i) (format "child~a" i))))
-    (define stmt
-      (string-append
-       "CREATE UNIQUE INDEX " rel-name "_uniq_idx "
-       " ON " rel-name "(" (string-join (cons "eclass" fields) ", ") ");"))
-    stmt)
+    (if (= arity 0)
+        "SELECT 1;"
+        (let* ([fields (build-list arity (λ (i) (format "child~a" i)))]
+               [stmt (string-append
+                      "CREATE UNIQUE INDEX " rel-name "_uniq_idx "
+                      " ON " rel-name "("
+                      ; (string-join (cons "eclass" fields) ", ")
+                      (string-join fields ", ")
+                      ");")])
+          stmt)))
 
   (define (create-idx-stmts rel-name arity)
     (define (stmt field [field-name field])
@@ -68,6 +74,23 @@
           (cons all-child-idx (cons class-idx child-idxs))))
     stmts)
 
+  (define (create-trigger-stmt rel-name arity insert?)
+    (define op (if insert? "INSERT" "UPDATE"))
+    (define select-clause
+      (string-join
+       (build-list arity (λ (i) (format "AND f.child~a = NEW.child~a" i i)))))
+    (define stmt
+      (string-append "CREATE TRIGGER trig_" op "_" rel-name " "
+                     "BEFORE " op " ON " rel-name " "
+                     ; "WHEN EXISTS "
+                     ; "(SELECT 1 FROM " rel-name " f WHERE TRUE " select-clause ") "
+                     "BEGIN "
+                     "INSERT INTO todo SELECT NEW.eclass, f.eclass "
+                     "FROM " rel-name " f "
+                     "WHERE NEW.eclass != f.eclass " select-clause " "
+                     "LIMIT 1; "
+                     "END"))
+    stmt)
   (define rel-name (next-rel-name))
   (define symbols (egraph-symbols E))
   (if (hash-has-key? symbols (cons f arity))
@@ -77,9 +100,13 @@
         (let ([conn (egraph-conn E)]
               [create-stmt (create-rel-stmt rel-name arity)]
               [uniq-stmt (create-uniq-stmt rel-name arity)]
-              [idx-stmts (create-idx-stmts rel-name arity)])
+              [idx-stmts (create-idx-stmts rel-name arity)]
+              [insert-trigger-stmt (create-trigger-stmt rel-name arity #t)]
+              [update-trigger-stmt (create-trigger-stmt rel-name arity #f)])
           (query-exec conn create-stmt)
           (query-exec conn uniq-stmt)
+          (query-exec conn insert-trigger-stmt)
+          (query-exec conn update-trigger-stmt)
           ; (for ([idx-stmt idx-stmts]) (query-exec conn idx-stmt))
           #t))))
 

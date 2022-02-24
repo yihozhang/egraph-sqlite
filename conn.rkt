@@ -8,4 +8,5 @@
     query-exec)
 
 (define (query-exec conn stmt)
+  ;; (displayln stmt)
   (old-query-exec conn stmt))

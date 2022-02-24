@@ -162,7 +162,8 @@
     (define vars (pattern-vars pat))
     (define select-clause (string-join (map symbol->string (cons id vars)) ", "))
     (define query
-      (format "INSERT OR IGNORE INTO ~a SELECT DISTINCT ~a FROM ~a" rel select-clause rw-rel-name))
+      (format "INSERT OR IGNORE INTO ~a SELECT DISTINCT ~a FROM ~a"
+              rel select-clause rw-rel-name))
     (query-exec conn query)))
 
 (define (view-table E rel)
@@ -183,51 +184,64 @@
   (populate-rw-rel-with-mat E rw-rel-name mat mat-var-set)
   (chase-rw-rel E rw-rel-name app mat-var-set)
   (define num-nulls (fill-nulls E rw-rel-name rw-var-set))
+  
   (values rw-rel-name num-nulls))
 
 (define (rebuild E)
   (define conn (egraph-conn E))
   (define ids (make-hash))
 
-  (for ([(symbol rel-name) (egraph-symbols E)])
-    (let* ([func (car symbol)]
-           [arity (cdr symbol)]
-           [where-clause
-            (string-join
-             (for/list ([i (in-range arity)])
-               (format "AND f1.child~a = f2.child~a" i i)))]
-           [stmt (format
-                  (string-append
-                   "SELECT DISTINCT f1.eclass, f2.eclass "
-                   "FROM ~a f1, ~a f2 "
-                   "WHERE f1.eclass != f2.eclass ~a;")
-                  rel-name rel-name where-clause)]
-           [todos (query-rows conn stmt)])
+  ;; (for ([(symbol rel-name) (egraph-symbols E)])
+  ;;   (let* ([func (car symbol)]
+  ;;          [arity (cdr symbol)]
+  ;;          [where-clause
+  ;;           (string-join
+  ;;            (for/list ([i (in-range arity)])
+  ;;              (format "AND f1.child~a = f2.child~a" i i)))]
+  ;;          [stmt (format
+  ;;                 (string-append
+  ;;                  "SELECT DISTINCT f1.eclass, f2.eclass "
+  ;;                  "FROM ~a f1, ~a f2 "
+  ;;                  "WHERE f1.eclass != f2.eclass ~a;")
+  ;;                 rel-name rel-name where-clause)]
+  ;;          [todos (query-rows conn stmt)])
 
-      (for ([todo todos])
-        (let* ([a (vector-ref todo 0)]
-               [b (vector-ref todo 1)]
-               [a+ (hash-ref! ids a (thunk (uf-new a)))]
-               [b+ (hash-ref! ids b (thunk (uf-new b)))])
-          (uf-union! a+ b+)))))
+  ;;     (for ([todo todos])
+  ;;       (let* ([a (vector-ref todo 0)]
+  ;;              [b (vector-ref todo 1)]
+  ;;              [a+ (hash-ref! ids a (thunk (uf-new a)))]
+  ;;              [b+ (hash-ref! ids b (thunk (uf-new b)))])
+  ;;         (uf-union! a+ b+)))))
+  ;; (define num-applied-cong (hash-count ids))
+  (let* ([select-stmt "SELECT * FROM todo;"]
+         [delete-stmt "DELETE FROM todo;"]
+         [todos (query-rows conn select-stmt)])
+    (query-exec conn delete-stmt)
+
+    (for ([todo todos])
+      (let* ([a (vector-ref todo 0)]
+             [b (vector-ref todo 1)]
+             [a+ (hash-ref! ids a (thunk (uf-new a)))]
+             [b+ (hash-ref! ids b (thunk (uf-new b)))])
+            (uf-union! a+ b+))))
+
   (define num-applied-cong (hash-count ids))
-
   (when (not (hash-empty? ids))
     (define cong-rel-name (symbol->string 'ids))
     (define create-stmt
-      (format "CREATE TABLE ~a (a INTEGER, b INTEGER)"
+      (format "CREATE TABLE ~a (a INTEGER, b INTEGER);"
               cong-rel-name))
     (query-exec conn create-stmt)
 
     (define cong-values
-      (string-join
-       (for/list ([(id id-canon) ids]
-                  #:when (not (equal? id (uf-find id-canon))))
-         (format "(~a, ~a)" id (uf-find id-canon)))
-      ", "))
-    (define insert-stmt
-      (format "INSERT INTO ~a VALUES ~a;" cong-rel-name cong-values))
-    (query-exec conn insert-stmt)
+      (for/list ([(id id-canon) ids]
+                 #:when (not (equal? id (uf-find id-canon))))
+        (format "(~a, ~a)" id (uf-find id-canon))))
+    (when (not (empty? cong-values))
+      (define insert-stmt
+        (format "INSERT INTO ~a VALUES ~a;" cong-rel-name
+                (string-join cong-values ", ")))
+      (query-exec conn insert-stmt))
 
     (for ([(symbol rel-name) (egraph-symbols E)])
       (define (stmt field)
@@ -235,7 +249,7 @@
                  "UPDATE OR REPLACE ~a "
                  "SET ~a = t.b "
                  "FROM ~a t "
-                 "WHERE ~a = t.a")
+                 "WHERE ~a = t.a;")
                 rel-name field cong-rel-name field))
       (query-exec conn (stmt "eclass"))
       (for* ([i (in-range (cdr symbol))])
@@ -260,13 +274,16 @@
           (build-rw-rel E mat app))
         (set! num-new-id (+ num-new-id num-nulls))
         rw-rel-name)))
+
   (for ([rw-rel-name rw-rel-names]
         [rw rws])
     (define app (rewrite-applier rw))
     (apply-rw-rel E rw-rel-name app)
     (drop-table E rw-rel-name))
+
   (define num-applied-cong (rebuild E))
   (commit-egraph-transaction E)
+
   (displayln num-new-id)
   (displayln num-applied-cong)
   (displayln "")
