@@ -242,6 +242,14 @@
 
     (for ([(symbol rel-name) (egraph-symbols E)])
       (define (stmt field)
+        ;; REPLACE makes sense here because there are
+        ;; only two scenarios:
+        ;; if this is updating a child, then since we have
+        ;; already insert into the todo table correctly, it
+        ;; does not matter whether the NEW one or the OLD one persist
+        ;; if this is updating an eclass, then we should use
+        ;; the replaced one as the eclass, and before that the
+        ;; trigger should also have inserted the correct tuples to todo.
         (format (string-append
                  "UPDATE OR REPLACE ~a "
                  "SET ~a = t.b "
