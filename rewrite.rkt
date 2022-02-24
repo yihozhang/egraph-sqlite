@@ -142,9 +142,12 @@
   (define num-nulls 0)
   (for ([var (in-list rw-vars)])
     (define field (symbol->string var))
-    (define count-query (format "SELECT COUNT(*) FROM ~a WHERE ~a IS NULL;" rw-rel-name field))
+    (define count-query
+      (format "SELECT COUNT(*) FROM ~a WHERE ~a IS NULL;" rw-rel-name field))
     (set! num-nulls (+ num-nulls (query-value conn count-query)))
-    (define query (format "UPDATE ~a SET ~a = next_id(total_changes()) WHERE ~a IS NULL;" rw-rel-name field field))
+    (define query
+      (format "UPDATE ~a SET ~a = next_id(total_changes()) WHERE ~a IS NULL;"
+              rw-rel-name field field))
     (query-exec conn query)
     )
   num-nulls)
@@ -187,13 +190,33 @@
 
   (values rw-rel-name num-nulls))
 
+(define (create-parent-table E)
+  (define conn (egraph-conn E))
+  (define symbols (egraph-symbols E))
+
+  (for* ([(symbol rel-name) symbols]
+         [field (cons "eclass"
+                      (build-list (cdr symbol) (λ (i) (format "child~a" i))))])
+    (query-exec conn
+                (string-append "INSERT INTO parent "
+                               "SELECT f." field ", COUNT(*) "
+                               "FROM " rel-name " f "
+                               "GROUP BY f." field)))
+  "parent")
+
+(define (delete-from-parent E)
+  (define conn (egraph-conn E))
+  (query-exec conn "DELETE FROM parent;"))
+
+
 (define (rebuild E)
   (define conn (egraph-conn E))
   (define ids (make-hash))
+  (define id->leader (make-hash))
 
   ;; (for ([(symbol rel-name) (egraph-symbols E)])
   ;;   (let* ([func (car symbol)]
-  ;;          [arity (cdr symbol)]
+  ;;          [arity (cdr symbol)
   ;;          [where-clause
   ;;           (string-join
   ;;            (for/list ([i (in-range arity)])
@@ -213,15 +236,40 @@
   ;;              [b+ (hash-ref! ids b (thunk (uf-new b)))])
   ;;         (uf-union! a+ b+)))))
   ;; (define num-applied-cong (hash-count ids))
-  (let* ([select-stmt "SELECT * FROM todo;"]
+
+  (let* ([parent-table-name (create-parent-table E)]
+         [select-stmt
+          (string-append "SELECT todo.a, todo.b, TOTAL(p1.t), TOTAL(p2.t) "
+                         "FROM todo "
+                         "LEFT JOIN parent p1 ON todo.a=p1.t "
+                         "LEFT JOIN parent p2 ON todo.b=p2.t "
+                         "GROUP BY todo.a, todo.b")]
          [delete-stmt "DELETE FROM todo;"])
-    (for ([(a b) (in-query conn select-stmt #:fetch 1000)])
+
+    (for ([(a b pa pb) (in-query conn select-stmt #:fetch 1000)])
       (let* ([a+ (hash-ref! ids a (thunk (uf-new a)))]
              [b+ (hash-ref! ids b (thunk (uf-new b)))])
-        (uf-union! a+ b+)))
+        ;; (uf-union! a+ b+)
+        (if (> (cdr (hash-ref! id->leader (uf-find a+) (cons a pa)))
+               (cdr (hash-ref! id->leader (uf-find b+) (cons b pb))))
+            (hash-set! id->leader (uf-find b+) (hash-ref id->leader (uf-find a+)))
+            (hash-set! id->leader (uf-find a+) (hash-ref id->leader (uf-find b+))))
+        (uf-union! a+ b+)
+        ))
 
-    (query-exec conn delete-stmt))
+    (query-exec conn delete-stmt)
+    (delete-from-parent E))
 
+  ;; (let* ([select-stmt (string-append "SELECT * FROM todo;")]
+  ;;        [delete-stmt "DELETE FROM todo;"])
+  ;;   (for ([(a b) (in-query conn select-stmt #:fetch 1000)])
+  ;;     (let* ([a+ (hash-ref! ids a (thunk (uf-new a)))]
+  ;;            [b+ (hash-ref! ids b (thunk (uf-new b)))])
+  ;;       (uf-union! a+ b+)))
+
+  ;;   (query-exec conn delete-stmt))
+
+  (displayln id->leader)
   (define num-applied-cong (hash-count ids))
   (when (not (hash-empty? ids))
     (define cong-rel-name (symbol->string 'ids))
@@ -232,8 +280,13 @@
 
     (define cong-values
       (for/list ([(id id-canon) ids]
-                 #:when (not (equal? id (uf-find id-canon))))
-        (format "(~a, ~a)" id (uf-find id-canon))))
+                 #:when (not (equal? id
+                                     (car (hash-ref id->leader (uf-find id-canon)))))
+                 ;; #:when (not (equal? id (uf-find id-canon)))
+                 )
+        (format "(~a, ~a)" id (car (hash-ref id->leader (uf-find id-canon))))
+        ;; (format "(~a, ~a)" id (uf-find id-canon))
+        ))
     (when (not (empty? cong-values))
       (define insert-stmt
         (format "INSERT INTO ~a VALUES ~a;" cong-rel-name
@@ -260,8 +313,7 @@
       (for* ([i (in-range (cdr symbol))])
           (query-exec conn (stmt (format "child~a" i)))))
 
-    (define drop-stmt (format "DROP TABLE ~a;" cong-rel-name))
-    (query-exec conn drop-stmt)
+    (drop-table E cong-rel-name)
 
     (set! num-applied-cong (+ num-applied-cong (rebuild E))))
 
@@ -305,7 +357,7 @@
       '(+ (1) (2))
       (list '+ (gen-expr (sub1 n)) (list n))))
 
-(for ([N (in-range 10 11)])
+(for ([N (in-range 8 9)])
   (define E (init-egraph))
   (add-symbol! E '+ 2)
   (for ([i (in-range 1 (add1 N))])

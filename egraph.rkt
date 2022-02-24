@@ -14,7 +14,8 @@
          egraph-symbols
          egraph-conn
          begin-egraph-transaction
-         commit-egraph-transaction)
+         commit-egraph-transaction
+         get-parent-view-name)
 
 (struct egraph (conn symbols [count #:mutable]))
 
@@ -23,12 +24,17 @@
   (define symbols (make-hash))
   (define E (egraph conn symbols 0))
   (define create-todo-stmt "CREATE TABLE todo (a INTEGER, b INTEGER);")
+  (define create-parent-stmt "CREATE TABLE parent (c INTEGER, t INTEGER)")
   (query-exec conn create-todo-stmt)
+  (query-exec conn create-parent-stmt)
   (sqlite3-create-function conn "next_id" 1
                            (λ (unused) (let ([count (egraph-count E)])
                                          (set-egraph-count! E (add1 count))
                                          count)))
   E)
+
+(define (get-parent-view-name rel-name)
+  (string-append rel-name "_parent "))
 
 (define (add-symbol! E f arity)
   (define (next-rel-name)
@@ -62,17 +68,8 @@
     (define child-idxs
       (for/list ([i arity])
         (stmt (format "child~a" i))))
-    (define class-idx (stmt "eclass"))
-    (define all-child-idx
-      (stmt (string-join
-             (build-list arity (λ (i) (format "child~a" i)))
-             ", ")
-            "all_child"))
-    (define stmts
-      (if (= arity 0)
-          (cons class-idx child-idxs)
-          (cons all-child-idx (cons class-idx child-idxs))))
-    stmts)
+    (define eclass-idx (stmt "eclass"))
+    (cons eclass-idx child-idxs))
 
   (define (create-trigger-stmt rel-name arity insert?)
     (define op (if insert? "INSERT" "UPDATE"))
@@ -82,8 +79,6 @@
     (define stmt
       (string-append "CREATE TRIGGER trig_" op "_" rel-name " "
                      "BEFORE " op " ON " rel-name " "
-                     ; "WHEN EXISTS "
-                     ; "(SELECT 1 FROM " rel-name " f WHERE TRUE " select-clause ") "
                      "BEGIN "
                      "INSERT INTO todo SELECT NEW.eclass, f.eclass "
                      "FROM " rel-name " f "
@@ -91,6 +86,52 @@
                      "LIMIT 1; "
                      "END"))
     stmt)
+
+  (define (create-view-stmt rel-name arity)
+    (define (build-stmt field)
+      (string-append "SELECT f." field ", count(*) "
+                     "FROM " rel-name " f "
+                     "GROUP BY f." field))
+
+    (define select-clause
+      (string-join
+       (cons (build-stmt "eclass")
+             (build-list arity
+                         (λ (i) (build-stmt (format "child~a" i)))))
+       " UNION ALL "))
+    (string-append "CREATE VIEW " (get-parent-view-name rel-name)
+                     "(c, t) AS " select-clause))
+
+  ;; (define (create-update-parent-stmts rel-name arity)
+  ;;   (define (stmt field)
+  ;;     (string-append "CREATE TRIGGER trig_update_" rel-name "_" field "_parent "
+  ;;                    "BEFORE UPDATE OF " field " ON " rel-name " "
+  ;;                    "BEGIN "
+  ;;                    "INSERT INTO parent SELECT NEW." field ", 0 "
+  ;;                    "WHERE NOT EXISTS "
+  ;;                    "(SELECT 1 FROM parent WHERE c = NEW." field "); "
+  ;;                    "UPDATE parent SET t = t + 1 WHERE c = NEW." field "; "
+  ;;                    "UPDATE parent SET t = t - 1 WHERE c = OLD." field "; "
+  ;;                    "END"))
+  ;;   (cons (stmt "eclass")
+  ;;         (build-list arity (λ (i) (stmt (format "child~a" i))))))
+
+  ;; (define (create-insert-parent-stmt rel-name arity)
+  ;;   (define (build-stmt field)
+  ;;     (string-append "INSERT INTO parent SELECT NEW." field ", 0 "
+  ;;                    "WHERE NOT EXISTS "
+  ;;                    "(SELECT 1 FROM parent WHERE c = NEW." field "); "
+  ;;                    "UPDATE parent SET t = t + 1 WHERE c = NEW." field "; "))
+  ;;   (define insert-stmts
+  ;;     (string-join (cons (build-stmt "eclass")
+  ;;                        (build-list arity
+  ;;                                    (λ (i) (build-stmt (format "child~a" i)))))))
+  ;;   (string-append "CREATE TRIGGER trig_insert_" rel-name "_parent "
+  ;;                  "BEFORE INSERT ON " rel-name " "
+  ;;                  "BEGIN "
+  ;;                  insert-stmts
+  ;;                  "END "))
+
   (define rel-name (next-rel-name))
   (define symbols (egraph-symbols E))
   (if (hash-has-key? symbols (cons f arity))
@@ -102,12 +143,22 @@
               [uniq-stmt (create-uniq-stmt rel-name arity)]
               [idx-stmts (create-idx-stmts rel-name arity)]
               [insert-trigger-stmt (create-trigger-stmt rel-name arity #t)]
-              [update-trigger-stmt (create-trigger-stmt rel-name arity #f)])
+              [update-trigger-stmt (create-trigger-stmt rel-name arity #f)]
+              ;; [insert-parent-stmt (create-insert-parent-stmt rel-name arity)]
+              ;; [update-parent-stmts (create-update-parent-stmts rel-name arity)]
+              ;; [view-stmt (create-view-stmt rel-name arity)]
+              )
           (query-exec conn create-stmt)
           (query-exec conn uniq-stmt)
+          (for ([stmt idx-stmts]) (query-exec conn stmt))
+
           (query-exec conn insert-trigger-stmt)
           (query-exec conn update-trigger-stmt)
-          ; (for ([idx-stmt idx-stmts]) (query-exec conn idx-stmt))
+
+          ;; (query-exec conn insert-parent-stmt)
+          ;; (for ([stmt update-parent-stmts]) (query-exec conn stmt))
+
+          ;; (query-exec conn view-stmt)
           #t))))
 
 (define (show-egraph E)
