@@ -184,7 +184,7 @@
   (populate-rw-rel-with-mat E rw-rel-name mat mat-var-set)
   (chase-rw-rel E rw-rel-name app mat-var-set)
   (define num-nulls (fill-nulls E rw-rel-name rw-var-set))
-  
+
   (values rw-rel-name num-nulls))
 
 (define (rebuild E)
@@ -214,16 +214,13 @@
   ;;         (uf-union! a+ b+)))))
   ;; (define num-applied-cong (hash-count ids))
   (let* ([select-stmt "SELECT * FROM todo;"]
-         [delete-stmt "DELETE FROM todo;"]
-         [todos (query-rows conn select-stmt)])
-    (query-exec conn delete-stmt)
-
-    (for ([todo todos])
-      (let* ([a (vector-ref todo 0)]
-             [b (vector-ref todo 1)]
-             [a+ (hash-ref! ids a (thunk (uf-new a)))]
+         [delete-stmt "DELETE FROM todo;"])
+    (for ([(a b) (in-query conn select-stmt #:fetch 1000)])
+      (let* ([a+ (hash-ref! ids a (thunk (uf-new a)))]
              [b+ (hash-ref! ids b (thunk (uf-new b)))])
-            (uf-union! a+ b+))))
+        (uf-union! a+ b+)))
+
+    (query-exec conn delete-stmt))
 
   (define num-applied-cong (hash-count ids))
   (when (not (hash-empty? ids))
