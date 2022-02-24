@@ -78,7 +78,6 @@
               [create-stmt (create-rel-stmt rel-name arity)]
               [uniq-stmt (create-uniq-stmt rel-name arity)]
               [idx-stmts (create-idx-stmts rel-name arity)])
-          (displayln idx-stmts)
           (query-exec conn create-stmt)
           (query-exec conn uniq-stmt)
           ; (for ([idx-stmt idx-stmts]) (query-exec conn idx-stmt))

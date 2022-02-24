@@ -139,10 +139,15 @@
 (define (fill-nulls E rw-rel-name rw-var-set)
   (define conn (egraph-conn E))
   (define rw-vars (hash-keys rw-var-set))
+  (define num-nulls 0)
   (for ([var (in-list rw-vars)])
     (define field (symbol->string var))
+    (define count-query (format "SELECT COUNT(*) FROM ~a WHERE ~a IS NULL;" rw-rel-name field))
+    (set! num-nulls (+ num-nulls (query-value conn count-query)))
     (define query (format "UPDATE ~a SET ~a = next_id(total_changes()) WHERE ~a IS NULL;" rw-rel-name field field))
-    (query-exec conn query)))
+    (query-exec conn query)
+    )
+  num-nulls)
 
 (define (drop-table E rel-name)
   (define conn (egraph-conn E))
@@ -177,15 +182,13 @@
   (define rw-rel-name (create-temp-table E rw-var-set))
   (populate-rw-rel-with-mat E rw-rel-name mat mat-var-set)
   (chase-rw-rel E rw-rel-name app mat-var-set)
-  (fill-nulls E rw-rel-name rw-var-set)
-  rw-rel-name)
+  (define num-nulls (fill-nulls E rw-rel-name rw-var-set))
+  (values rw-rel-name num-nulls))
 
 (define (rebuild E)
   (define conn (egraph-conn E))
   (define ids (make-hash))
 
-  (displayln "apply search time")
-  (time
   (for ([(symbol rel-name) (egraph-symbols E)])
     (let* ([func (car symbol)]
            [arity (cdr symbol)]
@@ -207,11 +210,9 @@
                [a+ (hash-ref! ids a (thunk (uf-new a)))]
                [b+ (hash-ref! ids b (thunk (uf-new b)))])
           (uf-union! a+ b+)))))
-  )
+  (define num-applied-cong (hash-count ids))
 
-  (displayln "apply time")
   (when (not (hash-empty? ids))
-    (time
     (define cong-rel-name (symbol->string 'ids))
     (define create-stmt
       (format "CREATE TABLE ~a (a INTEGER, b INTEGER)"
@@ -242,47 +243,54 @@
 
     (define drop-stmt (format "DROP TABLE ~a;" cong-rel-name))
     (query-exec conn drop-stmt)
-    )
 
-    (rebuild E)))
+    (set! num-applied-cong (+ num-applied-cong (rebuild E))))
+
+  num-applied-cong)
 
 (define (run-rw E rws)
   (begin-egraph-transaction E)
+  (define num-new-id 0)
   (define rw-rel-names
     (for/list ([rw rws])
       (let* ([mat (rewrite-matcher rw)]
              [app (rewrite-applier rw)])
-        (build-rw-rel E mat app))))
+        (define-values
+          (rw-rel-name num-nulls)
+          (build-rw-rel E mat app))
+        (set! num-new-id (+ num-new-id num-nulls))
+        rw-rel-name)))
   (for ([rw-rel-name rw-rel-names]
         [rw rws])
     (define app (rewrite-applier rw))
     (apply-rw-rel E rw-rel-name app)
     (drop-table E rw-rel-name))
-  (rebuild E)
-  (commit-egraph-transaction E))
+  (define num-applied-cong (rebuild E))
+  (commit-egraph-transaction E)
+  (displayln num-new-id)
+  (displayln num-applied-cong)
+  (displayln "")
+  (not (and (= num-applied-cong 0)
+            (= num-new-id 0))))
 
-(define E (init-egraph))
-(add-symbol! E '+ 2)
-(define N 11)
-(for ([i (in-range 0 N)])
-  (add-symbol! E i 0))
+(define (run-until-fixpoint E rws [iter 0])
+  (if (run-rw E rws)
+      (run-until-fixpoint E rws (add1 iter))
+      iter))
 
-; (add-s-expr! E '(+ (+ (+ (+ (+ (+ (+ (+ (+ (1) (2)) (3)) (4)) (5)) (6)) (7)) (8)) (9)) (10)))
-(add-s-expr! E '(+ (+ (+ (+ (+ (+ (+ (+ (1) (2)) (3)) (4)) (5)) (6)) (7)) (8)) (9)))
-; (add-s-expr! E '(+ (+ (+ (+ (+ (1) (2)) (3)) (4)) (5)) (6)))
-(define r1 (rw-rule ((+ (+ a b) c @ x)) => ((+ a (+ b c) @ x))))
-(define r2 (rw-rule ((+ a b @ x)) => ((+ b a @ x))))
-(time
- (for ([i (in-range 9)])
-   (run-rw E (list r1 r2))))
-; (get-s-expr-id E '(+ (+ (+ (+ (+ (+ (1) (2)) (3)) (4)) (5)) (6)) (7)))
-(get-s-expr-id E '(+ (7) (+ (6) (+ (5) (+ (4) (+ (3) (+ (2) (1))))))))
-(define conn (egraph-conn E))
+(define (gen-expr n)
+  (if (= n 2)
+      '(+ (1) (2))
+      (list '+ (gen-expr (sub1 n)) (list n))))
 
-;(define rule (rw-rule ((* x y @ c1)
-;                       (* z y @ c2))
-;                      =>
-;                      ((* (concat x z) y @ p)
-;                       (fst p @ c1)
-;                       (snd p @ c2))))
-; (query-rows conn "select sqlite_version();")
+(for ([N (in-range 10 11)])
+  (define E (init-egraph))
+  (add-symbol! E '+ 2)
+  (for ([i (in-range 1 (add1 N))])
+    (add-symbol! E i 0))
+
+  (add-s-expr! E (gen-expr N))
+  (define r1 (rw-rule ((+ (+ a b) c @ x)) => ((+ a (+ b c) @ x))))
+  (define r2 (rw-rule ((+ a b @ x)) => ((+ b a @ x))))
+  (time (displayln (run-until-fixpoint E (list r1 r2))))
+  (displayln (format "↑ TIME FOR N=~a" N)))
