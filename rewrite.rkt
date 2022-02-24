@@ -246,15 +246,21 @@
                          "GROUP BY todo.a, todo.b")]
          [delete-stmt "DELETE FROM todo;"])
 
+    (define max-combo
+      (λ lst (foldr (lambda (a b) (if (> (cdr a)
+                                         (cdr b))
+                                      a b))
+                    (car lst)
+                    (cdr lst))))
     (for ([(a b pa pb) (in-query conn select-stmt #:fetch 1000)])
       (let* ([a+ (hash-ref! ids a (thunk (uf-new a)))]
              [b+ (hash-ref! ids b (thunk (uf-new b)))])
-        ;; (uf-union! a+ b+)
-        (if (> (cdr (hash-ref! id->leader (uf-find a+) (cons a pa)))
-               (cdr (hash-ref! id->leader (uf-find b+) (cons b pb))))
-            (hash-set! id->leader (uf-find b+) (hash-ref id->leader (uf-find a+)))
-            (hash-set! id->leader (uf-find a+) (hash-ref id->leader (uf-find b+))))
+        (define combo (max-combo (hash-ref id->leader (uf-find a+) (cons a pa))
+                                 (hash-ref id->leader (uf-find b+) (cons b pb))
+                                 (cons a pa)
+                                 (cons b pa)))
         (uf-union! a+ b+)
+        (hash-set! id->leader (uf-find a+) combo)
         ))
 
     (query-exec conn delete-stmt)
@@ -269,7 +275,7 @@
 
   ;;   (query-exec conn delete-stmt))
 
-  (displayln id->leader)
+  ;; (displayln id->leader)
   (define num-applied-cong (hash-count ids))
   (when (not (hash-empty? ids))
     (define cong-rel-name (symbol->string 'ids))
@@ -357,7 +363,7 @@
       '(+ (1) (2))
       (list '+ (gen-expr (sub1 n)) (list n))))
 
-(for ([N (in-range 8 9)])
+(for ([N (in-range 9 10)])
   (define E (init-egraph))
   (add-symbol! E '+ 2)
   (for ([i (in-range 1 (add1 N))])
