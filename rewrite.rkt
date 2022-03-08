@@ -195,8 +195,8 @@
   (define symbols (egraph-symbols E))
 
   (for* ([(symbol rel-name) symbols]
-         [field (cons "eclass"
-                      (build-list (cdr symbol) (λ (i) (format "child~a" i))))])
+         ;; [field (cons "eclass" (build-list (cdr symbol) (λ (i) (format "child~a" i))))]
+         [field (build-list (cdr symbol) (λ (i) (format "child~a" i)))])
     (query-exec conn
                 (string-append "INSERT INTO parent "
                                "SELECT f." field ", COUNT(*) "
@@ -237,43 +237,44 @@
   ;;         (uf-union! a+ b+)))))
   ;; (define num-applied-cong (hash-count ids))
 
-  (let* ([parent-table-name (create-parent-table E)]
-         [select-stmt
-          (string-append "SELECT todo.a, todo.b, TOTAL(p1.t), TOTAL(p2.t) "
-                         "FROM todo "
-                         "LEFT JOIN parent p1 ON todo.a=p1.t "
-                         "LEFT JOIN parent p2 ON todo.b=p2.t "
-                         "GROUP BY todo.a, todo.b")]
-         [delete-stmt "DELETE FROM todo;"])
-
-    (define max-combo
-      (λ lst (foldr (lambda (a b) (if (> (cdr a)
-                                         (cdr b))
-                                      a b))
-                    (car lst)
-                    (cdr lst))))
-    (for ([(a b pa pb) (in-query conn select-stmt #:fetch 1000)])
-      (let* ([a+ (hash-ref! ids a (thunk (uf-new a)))]
-             [b+ (hash-ref! ids b (thunk (uf-new b)))])
-        (define combo (max-combo (hash-ref id->leader (uf-find a+) (cons a pa))
-                                 (hash-ref id->leader (uf-find b+) (cons b pb))
-                                 (cons a pa)
-                                 (cons b pa)))
-        (uf-union! a+ b+)
-        (hash-set! id->leader (uf-find a+) combo)
-        ))
-
-    (query-exec conn delete-stmt)
-    (delete-from-parent E))
-
-  ;; (let* ([select-stmt (string-append "SELECT * FROM todo;")]
+  ;; (let* ([parent-table-name (create-parent-table E)]
+  ;;        [select-stmt
+  ;;         (string-append "SELECT todo.a, todo.b, TOTAL(p1.t), TOTAL(p2.t) "
+  ;;                        "FROM todo "
+  ;;                        "LEFT JOIN parent p1 ON todo.a=p1.t "
+  ;;                        "LEFT JOIN parent p2 ON todo.b=p2.t "
+  ;;                        "GROUP BY todo.a, todo.b")]
   ;;        [delete-stmt "DELETE FROM todo;"])
-  ;;   (for ([(a b) (in-query conn select-stmt #:fetch 1000)])
+
+  ;;   (define max-combo
+  ;;     (λ lst (foldr (lambda (a b) (if (> (cdr a)
+  ;;                                        (cdr b))
+  ;;                                     a b))
+  ;;                   (car lst)
+  ;;                   (cdr lst))))
+  ;;   (for ([(a b pa pb) (in-query conn select-stmt #:fetch 1000)])
   ;;     (let* ([a+ (hash-ref! ids a (thunk (uf-new a)))]
   ;;            [b+ (hash-ref! ids b (thunk (uf-new b)))])
-  ;;       (uf-union! a+ b+)))
+  ;;       (define combo (max-combo (hash-ref id->leader (uf-find a+) (cons a pa))
+  ;;                                (hash-ref id->leader (uf-find b+) (cons b pb))
+  ;;                                (cons a pa)
+  ;;                                (cons b pa)))
+  ;;       (uf-union! a+ b+)
+  ;;       (hash-set! id->leader (uf-find a+) combo)
+  ;;       ))
 
-  ;;   (query-exec conn delete-stmt))
+  ;;   (query-exec conn delete-stmt)
+  ;;   (delete-from-parent E))
+
+  (let* ([select-stmt (string-append "SELECT * FROM todo;")]
+         [delete-stmt "DELETE FROM todo;"])
+    (for ([(a b) (in-query conn select-stmt #:fetch 1000)])
+      (let* ([a+ (hash-ref! ids a (thunk (uf-new a)))]
+             [b+ (hash-ref! ids b (thunk (uf-new b)))])
+        (uf-union! a+ b+)
+        (hash-set! id->leader (uf-find a+) (cons (uf-find a+) 0))))
+
+    (query-exec conn delete-stmt))
 
   ;; (displayln id->leader)
   (define num-applied-cong (hash-count ids))
@@ -363,14 +364,16 @@
       '(+ (1) (2))
       (list '+ (gen-expr (sub1 n)) (list n))))
 
-(for ([N (in-range 9 10)])
-  (define E (init-egraph))
-  (add-symbol! E '+ 2)
-  (for ([i (in-range 1 (add1 N))])
-    (add-symbol! E i 0))
+(define result
+  (for/list ([N (in-range 9 10)])
+    (define E (init-egraph))
+    (add-symbol! E '+ 2)
+    (for ([i (in-range 1 (add1 N))])
+      (add-symbol! E i 0))
 
-  (add-s-expr! E (gen-expr N))
-  (define r1 (rw-rule ((+ (+ a b) c @ x)) => ((+ a (+ b c) @ x))))
-  (define r2 (rw-rule ((+ a b @ x)) => ((+ b a @ x))))
-  (time (displayln (run-until-fixpoint E (list r1 r2))))
-  (displayln (format "↑ TIME FOR N=~a" N)))
+    (add-s-expr! E (gen-expr N))
+    (define r1 (rw-rule ((+ (+ a b) c @ x)) => ((+ a (+ b c) @ x))))
+    (define r2 (rw-rule ((+ a b @ x)) => ((+ b a @ x))))
+    (time (displayln (run-until-fixpoint E (list r1 r2))))
+    (displayln (format "↑ TIME FOR N=~a" N))
+    E))
